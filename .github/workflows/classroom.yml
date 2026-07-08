@@ -1,0 +1,78 @@
+name: Uplift Autograding Engine
+on: [push]
+
+jobs:
+  grade-assignment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Student Code
+        uses: actions/checkout@v4
+
+      - name: Initialize Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PyTest and Google API Frameworks
+        run: pip install pytest google-api-python-client google-auth
+
+      - name: Run Core Test Suite
+        id: tests
+        run: |
+          if PYTHONPATH=. pytest tests/test_hello.py; then
+            echo "SCORE=100" >> $GITHUB_ENV
+          else
+            echo "SCORE=0" >> $GITHUB_ENV
+          fi
+        continue-on-error: true
+
+      - name: Push Grade directly to Google Classroom Gradebook
+        if: always()
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GITHUB_USER: ${{ github.actor }}
+          FINAL_SCORE: ${{ env.SCORE }}
+        run: |
+          python -c "
+          import os, json, sys
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+
+          # Dynamic Scan for student email
+          student_email = None
+          if os.path.exists('student.txt'):
+              with open('student.txt', 'r') as f:
+                  file_email = f.read().strip()
+                  if '@' in file_email:
+                      student_email = file_email
+
+          if not student_email:
+              print(f'Error: No student email found. Add your email to student.txt'); sys.exit(0)
+
+          # YOUR UPDATED LAB 2 PARAMETERS
+          COURSE_ID = 'ODU1NDY4MzUyNDg0'       
+          COURSEWORK_ID = 'ODcwMzg4MjAzNzk5' 
+
+          info = json.loads(os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON'))
+          creds = service_account.Credentials.from_service_account_info(
+              info, scopes=['https://www.googleapis.com/auth/classroom.coursework.students']
+          )
+          service = build('classroom', 'v1', credentials=creds)
+
+          try:
+              res = service.courses().courseWork().studentSubmissions().list(
+                  courseId=COURSE_ID, courseWorkId=COURSEWORK_ID, userId=student_email
+              ).execute()
+              
+              sub_id = res['studentSubmissions'][0]['id']
+              score = float(os.getenv('FINAL_SCORE'))
+
+              service.courses().courseWork().studentSubmissions().patch(
+                  courseId=COURSE_ID, courseWorkId=COURSEWORK_ID, id=sub_id,
+                  updateMask='draftGrade,assignedGrade',
+                  body={'draftGrade': score, 'assignedGrade': score}
+              ).execute()
+              print(f'Successfully synchronized grade {score}/100 to Google Classroom for {student_email}!')
+          except Exception as e:
+              print(f'API Sync Failed for {student_email}: {e}')
+          "
